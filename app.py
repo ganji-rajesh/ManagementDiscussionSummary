@@ -1,15 +1,22 @@
 """
 Annual Report Text Extraction and Summarization with Gemini AI
-Streamlit Application
+Streamlit Application with Automatic Page Detection
 """
 
 import os
 import tempfile
-from typing import Optional
+from typing import Optional, Tuple
 
 import streamlit as st
 import google.generativeai as genai
 import pymupdf
+
+# Import functions from pdf_extraction_tools
+from pdf_extraction_tools import (
+    get_nth_occurrence_page,
+    get_topic_page_number,
+    get_word_occurrence_pages
+)
 
 
 # Page configuration
@@ -19,6 +26,47 @@ st.set_page_config(
     layout="wide",
     initial_sidebar_state="expanded"
 )
+
+
+def get_automatic_page_range(pdf_path: str) -> Tuple[Optional[int], Optional[int], str]:
+    """
+    Automatically detect the Management Discussion section page range.
+    
+    Args:
+        pdf_path: Path to the PDF file
+    
+    Returns:
+        Tuple of (start_page, end_page, status_message)
+    """
+    try:
+        # Step 1: Find the contents page (first occurrence of 'content')
+        contents_page_no = get_nth_occurrence_page(pdf_path, 'content', 1)
+        
+        if contents_page_no is None:
+            return None, None, "❌ Could not find 'content' page in the PDF"
+        
+        # Step 2: Find the starting page of "management discussion"
+        result = get_topic_page_number(pdf_path, contents_page_no, "management discussion")
+        
+        if result is None:
+            return None, None, f"❌ Could not find 'management discussion' topic on contents page {contents_page_no}"
+        
+        starting_page = result[0]
+        
+        # Step 3: Find the ending page (page with "cautionary statement")
+        cautionary_pages = get_word_occurrence_pages(pdf_path, "cautionary statement")
+        
+        if not cautionary_pages:
+            return None, None, "❌ Could not find 'cautionary statement' in the PDF"
+        
+        # Get the second occurrence (index 1) if available, otherwise use the first
+        ending_page = cautionary_pages[1] if len(cautionary_pages) > 1 else cautionary_pages[0]
+        
+        status_msg = f"✅ Auto-detected pages: {starting_page} to {ending_page}"
+        return starting_page, ending_page, status_msg
+        
+    except Exception as e:
+        return None, None, f"❌ Error during automatic detection: {str(e)}"
 
 
 def extract_text_from_pdf(
@@ -179,27 +227,39 @@ def main():
             help="Upload the annual report PDF file"
         )
         
-        # Page range inputs
-        st.header("📖 Page Range")
-        col1, col2 = st.columns(2)
+        # Page detection mode
+        st.header("📖 Page Detection")
+        detection_mode = st.radio(
+            "Detection Mode",
+            options=["Automatic", "Manual"],
+            help="Choose automatic detection or manually specify page range"
+        )
         
-        with col1:
-            start_page = st.number_input(
-                "Start Page",
-                min_value=1,
-                value=165,
-                step=1,
-                help="First page of MD&A section"
-            )
-        
-        with col2:
-            end_page = st.number_input(
-                "End Page",
-                min_value=1,
-                value=211,
-                step=1,
-                help="Last page of MD&A section"
-            )
+        # Manual page range inputs (only shown in Manual mode)
+        if detection_mode == "Manual":
+            col1, col2 = st.columns(2)
+            
+            with col1:
+                start_page = st.number_input(
+                    "Start Page",
+                    min_value=1,
+                    value=165,
+                    step=1,
+                    help="First page of MD&A section"
+                )
+            
+            with col2:
+                end_page = st.number_input(
+                    "End Page",
+                    min_value=1,
+                    value=211,
+                    step=1,
+                    help="Last page of MD&A section"
+                )
+        else:
+            st.info("📍 Pages will be detected automatically")
+            start_page = None
+            end_page = None
         
         st.divider()
         
@@ -221,10 +281,16 @@ def main():
                to create a free API key
             2. **Enter API Key**: Paste your API key in the sidebar
             3. **Upload PDF**: Upload your annual report PDF file
-            4. **Specify Pages**: Enter the start and end page numbers for the 
-               Management Discussion & Analysis section
+            4. **Choose Detection Mode**:
+               - **Automatic**: Automatically finds Management Discussion section
+               - **Manual**: Specify start and end page numbers
             5. **Select Model**: Choose the appropriate Gemini model
             6. **Generate**: Click "Generate Summary" to process
+            
+            **Automatic Detection Logic**:
+            - Finds the "content" page in the PDF
+            - Locates "management discussion" in the table of contents
+            - Identifies ending at "cautionary statement"
             
             **Note**: Processing may take 30-60 seconds depending on document length.
             """)
@@ -233,7 +299,6 @@ def main():
     
     # Display file info
     st.success(f"✅ File uploaded: **{uploaded_file.name}**")
-    st.info(f"📄 Extracting pages: **{start_page} to {end_page}**")
     
     # Process when button clicked
     if process_button:
@@ -243,9 +308,33 @@ def main():
             st.error("❌ Please enter your Gemini API key in the sidebar")
             return
         
-        if start_page > end_page:
-            st.error("❌ Start page must be less than or equal to end page")
-            return
+        # Handle automatic or manual page detection
+        if detection_mode == "Automatic":
+            # Save file temporarily for page detection
+            with tempfile.NamedTemporaryFile(delete=False, suffix='.pdf') as tmp_file:
+                tmp_file.write(uploaded_file.getvalue())
+                tmp_path = tmp_file.name
+            
+            with st.spinner("🔍 Auto-detecting page range..."):
+                start_page, end_page, status_msg = get_automatic_page_range(tmp_path)
+            
+            # Clean up temp file
+            os.unlink(tmp_path)
+            
+            # Display detection result
+            if start_page is None or end_page is None:
+                st.error(status_msg)
+                st.info("💡 Try using **Manual** mode to specify pages directly")
+                return
+            else:
+                st.success(status_msg)
+        else:
+            # Manual mode validation
+            if start_page > end_page:
+                st.error("❌ Start page must be less than or equal to end page")
+                return
+        
+        st.info(f"📄 Extracting pages: **{start_page} to {end_page}**")
         
         # Step 1: Extract text
         with st.spinner("📖 Extracting text from PDF..."):
