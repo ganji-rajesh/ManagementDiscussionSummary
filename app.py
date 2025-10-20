@@ -18,7 +18,6 @@ from pdf_extraction_tools import (
     get_word_occurrence_pages
 )
 
-
 # Page configuration
 st.set_page_config(
     page_title="Annual Report Summarizer",
@@ -26,7 +25,6 @@ st.set_page_config(
     layout="wide",
     initial_sidebar_state="expanded"
 )
-
 
 def get_automatic_page_range(pdf_path: str) -> Tuple[Optional[int], Optional[int], str]:
     """
@@ -67,7 +65,6 @@ def get_automatic_page_range(pdf_path: str) -> Tuple[Optional[int], Optional[int
         
     except Exception as e:
         return None, None, f"❌ Error during automatic detection: {str(e)}"
-
 
 def extract_text_from_pdf(
     pdf_file,
@@ -131,7 +128,6 @@ def extract_text_from_pdf(
     except Exception as e:
         return "", f"Error extracting text: {str(e)}"
 
-
 def summarize_with_gemini(
     text: str,
     api_key: str,
@@ -181,7 +177,6 @@ Text to summarize:
     except Exception as e:
         return "", f"Error generating summary: {str(e)}"
 
-
 def main():
     """Main Streamlit application."""
     
@@ -192,6 +187,10 @@ def main():
         "sections from annual reports using Google Gemini AI"
     )
     st.divider()
+    
+    # Initialize session state for detection mode if not exists
+    if 'detection_mode' not in st.session_state:
+        st.session_state.detection_mode = "Automatic"
     
     # Sidebar for inputs
     with st.sidebar:
@@ -227,16 +226,26 @@ def main():
             help="Upload the annual report PDF file"
         )
         
-        # Page detection mode
+        st.divider()
+        
+        # Page detection mode - MOVED BEFORE conditional logic
         st.header("📖 Page Detection")
+        
+        # Use session state to persist selection
         detection_mode = st.radio(
             "Detection Mode",
             options=["Automatic", "Manual"],
-            help="Choose automatic detection or manually specify page range"
+            index=0 if st.session_state.detection_mode == "Automatic" else 1,
+            help="Choose automatic detection or manually specify page range",
+            key="detection_mode_radio"
         )
         
-        # Manual page range inputs (only shown in Manual mode)
+        # Update session state
+        st.session_state.detection_mode = detection_mode
+        
+        # Show appropriate UI based on mode
         if detection_mode == "Manual":
+            st.write("")  # Add spacing
             col1, col2 = st.columns(2)
             
             with col1:
@@ -245,7 +254,8 @@ def main():
                     min_value=1,
                     value=165,
                     step=1,
-                    help="First page of MD&A section"
+                    help="First page of MD&A section",
+                    key="manual_start_page"
                 )
             
             with col2:
@@ -254,7 +264,8 @@ def main():
                     min_value=1,
                     value=211,
                     step=1,
-                    help="Last page of MD&A section"
+                    help="Last page of MD&A section",
+                    key="manual_end_page"
                 )
         else:
             st.info("📍 Pages will be detected automatically")
@@ -267,7 +278,8 @@ def main():
         process_button = st.button(
             "🚀 Generate Summary",
             type="primary",
-            use_container_width=True
+            use_container_width=True,
+            disabled=(not uploaded_file or not api_key)
         )
     
     # Main content area
@@ -275,8 +287,10 @@ def main():
         st.info("👈 Please upload a PDF file from the sidebar to begin")
         
         # Instructions
-        with st.expander("📚 How to use this app"):
+        with st.expander("📚 How to use this app", expanded=True):
             st.markdown("""
+            ### Getting Started
+            
             1. **Get Gemini API Key**: Visit [Google AI Studio](https://aistudio.google.com/app/apikey) 
                to create a free API key
             2. **Enter API Key**: Paste your API key in the sidebar
@@ -287,18 +301,28 @@ def main():
             5. **Select Model**: Choose the appropriate Gemini model
             6. **Generate**: Click "Generate Summary" to process
             
-            **Automatic Detection Logic**:
-            - Finds the "content" page in the PDF
-            - Locates "management discussion" in the table of contents
-            - Identifies ending at "cautionary statement"
+            ### Automatic Detection Logic
             
-            **Note**: Processing may take 30-60 seconds depending on document length.
+            The automatic mode uses intelligent pattern matching to:
+            - Find the "content" or "table of contents" page in the PDF
+            - Locate "management discussion" topic in the table of contents
+            - Identify the ending at "cautionary statement"
+            
+            ### Note
+            
+            Processing may take 30-60 seconds depending on document length.
             """)
         
         return
     
     # Display file info
     st.success(f"✅ File uploaded: **{uploaded_file.name}**")
+    
+    # Show current detection mode in main area
+    if detection_mode == "Automatic":
+        st.info("🔍 **Mode**: Automatic page detection enabled")
+    else:
+        st.info(f"📝 **Mode**: Manual - Pages {start_page} to {end_page}")
     
     # Process when button clicked
     if process_button:
@@ -390,7 +414,6 @@ def main():
             mime="text/plain",
             use_container_width=True
         )
-
 
 if __name__ == "__main__":
     main()
