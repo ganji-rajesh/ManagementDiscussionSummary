@@ -11,7 +11,7 @@ import google.generativeai as genai
 import fitz  # PyMuPDF
 
 # Import the new extraction function
-from pdf_extraction_tools import extract_pdf_content
+from pdf_extraction_tools1 import extract_pdf_content
 
 
 # Page configuration
