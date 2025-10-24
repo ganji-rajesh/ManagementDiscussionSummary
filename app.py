@@ -8,10 +8,10 @@ import tempfile
 from typing import Optional, Tuple, List
 import streamlit as st
 import google.generativeai as genai
-import pymupdf  # PyMuPDF
+import fitz  # PyMuPDF
 
 # Import the new extraction function
-from pdf_extraction_tools1 import extract_pdf_content
+from pdf_extraction_tools import extract_pdf_content
 
 
 # Page configuration
@@ -96,7 +96,7 @@ def extract_text_from_pdf(
             tmp_path = tmp_file.name
         
         # Open PDF
-        doc = pymupdf.open(tmp_path)
+        doc = fitz.open(tmp_path)
         
         # Validate page range
         total_pages = len(doc)
