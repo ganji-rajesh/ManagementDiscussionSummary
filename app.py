@@ -1,76 +1,83 @@
 """
 Annual Report Text Extraction and Summarization with Gemini AI
-Streamlit Application with Automatic Page Detection
+Streamlit Application with User-Confirmed Page Detection
 """
 
 import os
 import tempfile
-from typing import Optional, Tuple
-
+from typing import Optional, Tuple, List
 import streamlit as st
 import google.generativeai as genai
-import pymupdf
+import pymupdf  # PyMuPDF
 
-# Import functions from pdf_extraction_tools
-from pdf_extraction_tools import (
-    get_nth_occurrence_page,
-    get_topic_page_number,
-    get_word_occurrence_pages
-)
+# Import the new extraction function
+from pdf_extraction_tools1 import extract_pdf_content
+
 
 # Page configuration
 st.set_page_config(
-    page_title="Annual Report Summarizer",
+    page_title="MDA Summarizer",
     page_icon="📄",
     layout="wide",
     initial_sidebar_state="expanded"
 )
 
-def get_automatic_page_range(pdf_path: str) -> Tuple[Optional[int], Optional[int], str]:
+
+def get_automatic_page_numbers(pdf_path: str) -> Tuple[bool, dict, str]:
     """
-    Automatically detect the Management Discussion section page range.
+    Extract page numbers from PDF for user confirmation.
     
     Args:
         pdf_path: Path to the PDF file
     
     Returns:
-        Tuple of (start_page, end_page, status_message)
+        Tuple of (success, numbers_dict, message)
     """
     try:
-        # Step 1: Find the contents page (first occurrence of 'content')
-        contents_page_no = get_nth_occurrence_page(pdf_path, 'content', 1)
+        # Use the new extract_pdf_content function
+        result = extract_pdf_content(
+            pdf_path,
+            target_phrases=["management discussion and analysis", "corporate"]
+        )
         
-        if contents_page_no is None:
-            return None, None, "❌ Could not find 'content' page in the PDF"
+        if not result['success']:
+            return False, {}, f"❌ {result.get('message', 'Could not find target phrases in PDF')}"
         
-        # Step 2: Find the starting page of "management discussion"
-        result = get_topic_page_number(pdf_path, contents_page_no, "management discussion")
+        # Extract all candidate page numbers
+        toc_page = result['table_of_content']
         
-        if result is None:
-            return None, None, f"❌ Could not find 'management discussion' topic on contents page {contents_page_no}"
+        # Get all page number numbers from the result
+        # mda_starting_page_numbers contains: [(page_num, distance), ...]
+        # mda_ending_page_numbers contains: [(page_num, distance), ...]
         
-        starting_page = result[0]
+        starting_numbers = result.get('mda_starting_page_numbers', [])
+        ending_numbers = result.get('mda_ending_page_numbers', [])
         
-        # Step 3: Find the ending page (page with "cautionary statement")
-        cautionary_pages = get_word_occurrence_pages(pdf_path, "cautionary statement")
+        numbers = {
+            'table_of_content_page': toc_page,
+            'starting_pages': starting_numbers,  # List of (page, distance) tuples
+            'ending_pages': ending_numbers,      # List of (page, distance) tuples
+            'found_phrases': result.get('found_phrases', [])
+        }
         
-        if not cautionary_pages:
-            return None, None, "❌ Could not find 'cautionary statement' in the PDF"
-        
-        # Get the second occurrence (index 1) if available, otherwise use the first
-        ending_page = cautionary_pages[1] if len(cautionary_pages) > 1 else cautionary_pages[0]
-        
-        status_msg = f"✅ Auto-detected pages: {starting_page} to {ending_page}"
-        return starting_page, ending_page, status_msg
+        return True, numbers, f"✅ Table of contents page {toc_page}"
         
     except Exception as e:
-        return None, None, f"❌ Error during automatic detection: {str(e)}"
+        return False, {}, f"❌ Error during page detection: {str(e)}"
 
+
+# def extract_text_from_pdf(
+#     pdf_file,
+#     start_page: int,
+#     end_page: int
+# ) -> tuple[str, str]:
 def extract_text_from_pdf(
     pdf_file,
     start_page: int,
-    end_page: int
+    end_page: int,
+    toc_page: int  # NEW PARAMETER
 ) -> tuple[str, str]:
+
     """
     Extract text from specific page range in PDF.
     
@@ -93,7 +100,6 @@ def extract_text_from_pdf(
         
         # Validate page range
         total_pages = len(doc)
-        
         if start_page < 1 or end_page < start_page:
             doc.close()
             os.unlink(tmp_path)
@@ -110,7 +116,9 @@ def extract_text_from_pdf(
         all_text = []
         progress_bar = st.progress(0)
         
-        for idx, page_num in enumerate(range(start_page - 1, end_page)):
+        # for idx, page_num in enumerate(range(start_page - 1, end_page)):
+        # NEW CODE:
+        for idx, page_num in enumerate(range(start_page + toc_page - 1, end_page + toc_page)):
             page = doc[page_num]
             page_text = page.get_text()
             all_text.append(page_text)
@@ -122,16 +130,17 @@ def extract_text_from_pdf(
         doc.close()
         os.unlink(tmp_path)
         
-        extracted_text = '\n'.join(all_text)
+        extracted_text = '\\n'.join(all_text)
         return extracted_text, ""
-        
+    
     except Exception as e:
         return "", f"Error extracting text: {str(e)}"
+
 
 def summarize_with_gemini(
     text: str,
     api_key: str,
-    model_name: str = "gemini-2.5-flash"
+    model_name: str = "gemini-2.0-flash-exp"
 ) -> tuple[str, str]:
     """
     Summarize text using Google Gemini API.
@@ -155,7 +164,7 @@ def summarize_with_gemini(
         model = genai.GenerativeModel(model_name)
         
         # Create the prompt
-        prompt = f"""Please provide a comprehensive summary of the following \
+        prompt = f"""Please provide a comprehensive summary of the following \\
 Management Discussion and Analysis section from an annual report.
 
 Focus on:
@@ -171,26 +180,30 @@ Text to summarize:
         
         # Generate summary
         response = model.generate_content(prompt)
-        
         return response.text, ""
-        
+    
     except Exception as e:
         return "", f"Error generating summary: {str(e)}"
+
 
 def main():
     """Main Streamlit application."""
     
     # Header
-    st.title("📄 Annual Report Summarizer")
+    st.title("📄 MDA Summarizer")
     st.markdown(
         "Extract and summarize Management Discussion & Analysis "
         "sections from annual reports using Google Gemini AI"
     )
     st.divider()
     
-    # Initialize session state for detection mode if not exists
+    # Initialize session state
     if 'detection_mode' not in st.session_state:
         st.session_state.detection_mode = "Automatic"
+    if 'numbers' not in st.session_state:
+        st.session_state.numbers = None
+    if 'detection_complete' not in st.session_state:
+        st.session_state.detection_complete = False
     
     # Sidebar for inputs
     with st.sidebar:
@@ -208,10 +221,10 @@ def main():
         model_choice = st.selectbox(
             "Select Model",
             options=[
-                "gemini-2.5-flash",
-                "gemini-2.5-pro",
-                "gemini-2.0-flash",
-                "gemini-pro-latest"
+                "gemini-2.0-flash-exp",
+                "gemini-1.5-flash",
+                "gemini-1.5-pro",
+                "gemini-pro"
             ],
             help="Choose the Gemini model for summarization"
         )
@@ -228,58 +241,65 @@ def main():
         
         st.divider()
         
-        # Page detection mode - MOVED BEFORE conditional logic
+        # Page detection mode
         st.header("📖 Page Detection")
         
-        # Use session state to persist selection
+        # Detection mode selection
         detection_mode = st.radio(
             "Detection Mode",
             options=["Automatic", "Manual"],
-            index=0 if st.session_state.detection_mode == "Automatic" else 1,
-            help="Choose automatic detection or manually specify page range",
-            key="detection_mode_radio"
+            index=0,
+            help="Choose automatic detection with confirmation or manually specify page range"
         )
         
-        # Update session state
         st.session_state.detection_mode = detection_mode
         
-        # Show appropriate UI based on mode
+        # Manual mode inputs
         if detection_mode == "Manual":
-            st.write("")  # Add spacing
+            st.write("")
             col1, col2 = st.columns(2)
             
             with col1:
-                start_page = st.number_input(
+                manual_start = st.number_input(
                     "Start Page",
                     min_value=1,
                     value=165,
                     step=1,
-                    help="First page of MD&A section",
-                    key="manual_start_page"
+                    help="First page of MD&A section"
                 )
             
             with col2:
-                end_page = st.number_input(
+                manual_end = st.number_input(
                     "End Page",
                     min_value=1,
                     value=211,
                     step=1,
-                    help="Last page of MD&A section",
-                    key="manual_end_page"
+                    help="Last page of MD&A section"
                 )
-        else:
-            st.info("📍 Pages will be detected automatically")
-            start_page = None
-            end_page = None
         
         st.divider()
         
+        # Detect pages button (for automatic mode)
+        if detection_mode == "Automatic" and uploaded_file:
+            detect_button = st.button(
+                "🔍 Detect Page Numbers",
+                type="secondary",
+                use_container_width=True
+            )
+        else:
+            detect_button = False
+        
         # Process button
+        if detection_mode == "Manual":
+            process_enabled = uploaded_file and api_key
+        else:
+            process_enabled = uploaded_file and api_key and st.session_state.detection_complete
+        
         process_button = st.button(
             "🚀 Generate Summary",
             type="primary",
             use_container_width=True,
-            disabled=(not uploaded_file or not api_key)
+            disabled=not process_enabled
         )
     
     # Main content area
@@ -289,74 +309,155 @@ def main():
         # Instructions
         with st.expander("📚 How to use this app", expanded=True):
             st.markdown("""
-            ### Getting Started
-            
-            1. **Get Gemini API Key**: Visit [Google AI Studio](https://aistudio.google.com/app/apikey) 
-               to create a free API key
-            2. **Enter API Key**: Paste your API key in the sidebar
-            3. **Upload PDF**: Upload your annual report PDF file
-            4. **Choose Detection Mode**:
-               - **Automatic**: Automatically finds Management Discussion section
-               - **Manual**: Specify start and end page numbers
-            5. **Select Model**: Choose the appropriate Gemini model
-            6. **Generate**: Click "Generate Summary" to process
-            
-            ### Automatic Detection Logic
-            
-            The automatic mode uses intelligent pattern matching to:
-            - Find the "content" or "table of contents" page in the PDF
-            - Locate "management discussion" topic in the table of contents
-            - Identify the ending at "cautionary statement"
-            
-            ### Note
-            
-            Processing may take 30-60 seconds depending on document length.
-            """)
-        
+### Getting Started
+
+1. **Get Gemini API Key**: Visit [Google AI Studio](https://aistudio.google.com/app/apikey) 
+   to create a free API key
+2. **Enter API Key**: Paste your API key in the sidebar
+3. **Upload PDF**: Upload your annual report PDF file
+4. **Choose Detection Mode**:
+   - **Automatic**: AI detects starting and ending pages management discussion section, you confirm them from the selection
+   - **Manual**: Specify start and end page numbers directly
+5. **Detect Pages** (Automatic mode): Click to find page number numbers
+6. **Confirm Pages** (Automatic mode): Review and select the correct page numbers
+7. **Generate Summary**: Click to process and summarize
+
+### Automatic Detection with Confirmation
+
+The automatic mode:
+- Searches for "Management Discussion and Analysis" in the Table of Contents
+- Extracts all nearby page numbers using spatial analysis
+- Presents them to you for confirmation
+- Uses your confirmed selection for extraction
+
+### Note
+
+Processing may take 30-60 seconds depending on document length.
+""")
         return
     
     # Display file info
     st.success(f"✅ File uploaded: **{uploaded_file.name}**")
     
-    # Show current detection mode in main area
-    if detection_mode == "Automatic":
-        st.info("🔍 **Mode**: Automatic page detection enabled")
-    else:
-        st.info(f"📝 **Mode**: Manual - Pages {start_page} to {end_page}")
-    
-    # Process when button clicked
-    if process_button:
+    # Handle page detection button click
+    if detect_button:
+        # Save file temporarily for page detection
+        with tempfile.NamedTemporaryFile(delete=False, suffix='.pdf') as tmp_file:
+            tmp_file.write(uploaded_file.getvalue())
+            tmp_path = tmp_file.name
         
+        with st.spinner("🔍 Detecting page numbers using spatial analysis..."):
+            success, numbers, msg = get_automatic_page_numbers(tmp_path)
+        
+        # Clean up temp file
+        os.unlink(tmp_path)
+        
+        if success:
+            st.session_state.numbers = numbers
+            st.session_state.detection_complete = False
+            st.success(msg)
+        else:
+            st.error(msg)
+            st.session_state.numbers = None
+    
+    # Display candidate selection UI if numbers are available
+    if st.session_state.numbers and detection_mode == "Automatic":
+        st.subheader("📋 Detected Page Number numbers")
+        
+        numbers = st.session_state.numbers
+        
+        st.info(f"📍 Found in Table of Contents on page **{numbers['table_of_content_page']}**")
+        st.write(f"🔍 Search phrase: **{', '.join(numbers['found_phrases'])}**")
+        
+        st.divider()
+        
+        # Create columns for start and end page selection
+        col1, col2 = st.columns(2)
+        
+        with col1:
+            st.write("### 📖 Starting Page numbers")
+            
+            starting_pages = numbers['starting_pages']
+            if starting_pages:
+                # Create options list with page numbers and distances
+                start_options = []
+                for page_num, distance in starting_pages[:10]:  # Show top 10 numbers
+                    start_options.append(f"Page {int(page_num)} (distance: {distance:.1f})")
+                
+                selected_start_option = st.radio(
+                    "Select starting page:",
+                    options=start_options,
+                    index=0,
+                    key="start_page_selection"
+                )
+                
+                # Extract the selected page number
+                confirmed_start = int(selected_start_option.split()[1])
+            else:
+                st.warning("No starting page numbers found")
+                confirmed_start = None
+        
+        with col2:
+            st.write("### 📖 Ending Page numbers")
+            
+            ending_pages = numbers['ending_pages']
+            if ending_pages:
+                # Create options list
+                end_options = []
+                for page_num, distance in ending_pages[:5]:  # Show top 5 numbers
+                    end_options.append(f"Page {int(page_num)} (distance: {distance:.1f})")
+                
+                selected_end_option = st.radio(
+                    "Select ending page:",
+                    options=end_options,
+                    index=0,
+                    key="end_page_selection"
+                )
+                
+                # Extract the selected page number
+                confirmed_end = int(selected_end_option.split()[1])
+            else:
+                st.warning("No ending page numbers found")
+                confirmed_end = None
+        
+        st.divider()
+        
+        # Confirm button
+        if confirmed_start and confirmed_end:
+            if st.button("✅ Confirm Page Selection", type="primary", use_container_width=True):
+                st.session_state.confirmed_start_page = confirmed_start
+                st.session_state.confirmed_end_page = confirmed_end
+                st.session_state.detection_complete = True
+                st.success(f"✅ Confirmed: Pages {confirmed_start} to {confirmed_end}")
+                st.rerun()
+        
+        # Show confirmed pages if available
+        if st.session_state.detection_complete:
+            st.success(
+                f"✅ **Confirmed Page Range:** {st.session_state.confirmed_start_page} "
+                f"to {st.session_state.confirmed_end_page}"
+            )
+    
+    # Process when Generate Summary button clicked
+    if process_button:
         # Validation
         if not api_key:
             st.error("❌ Please enter your Gemini API key in the sidebar")
             return
         
-        # Handle automatic or manual page detection
-        if detection_mode == "Automatic":
-            # Save file temporarily for page detection
-            with tempfile.NamedTemporaryFile(delete=False, suffix='.pdf') as tmp_file:
-                tmp_file.write(uploaded_file.getvalue())
-                tmp_path = tmp_file.name
+        # Determine page range based on mode
+        if detection_mode == "Manual":
+            start_page = manual_start
+            end_page = manual_end
             
-            with st.spinner("🔍 Auto-detecting page range..."):
-                start_page, end_page, status_msg = get_automatic_page_range(tmp_path)
-            
-            # Clean up temp file
-            os.unlink(tmp_path)
-            
-            # Display detection result
-            if start_page is None or end_page is None:
-                st.error(status_msg)
-                st.info("💡 Try using **Manual** mode to specify pages directly")
-                return
-            else:
-                st.success(status_msg)
-        else:
-            # Manual mode validation
             if start_page > end_page:
                 st.error("❌ Start page must be less than or equal to end page")
                 return
+        else:
+            # Automatic mode - use confirmed pages
+            start_page = st.session_state.confirmed_start_page
+            end_page = st.session_state.confirmed_end_page
+            toc_page = st.session_state.numbers['table_of_content_page']
         
         st.info(f"📄 Extracting pages: **{start_page} to {end_page}**")
         
@@ -365,7 +466,8 @@ def main():
             extracted_text, error = extract_text_from_pdf(
                 uploaded_file,
                 start_page,
-                end_page
+                end_page,
+                toc_page
             )
         
         if error:
@@ -384,7 +486,7 @@ def main():
                 extracted_text[:5000] + "..." if len(extracted_text) > 5000 
                 else extracted_text,
                 height=300,
-                disabled=True
+                disabled=False
             )
         
         # Step 2: Summarize
@@ -415,5 +517,9 @@ def main():
             use_container_width=True
         )
 
+
 if __name__ == "__main__":
     main()
+
+
+
