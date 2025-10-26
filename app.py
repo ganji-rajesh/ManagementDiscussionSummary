@@ -8,7 +8,7 @@ import tempfile
 from typing import Optional, Tuple, List
 import streamlit as st
 import google.generativeai as genai
-import fitz  # PyMuPDF
+import pymupdf  # PyMuPDF
 
 # Import the new extraction function
 from pdf_extraction_tools1 import extract_pdf_content
@@ -23,35 +23,26 @@ st.set_page_config(
 )
 
 
+
 def get_automatic_page_numbers(pdf_path: str) -> Tuple[bool, dict, str]:
     """
     Extract page numbers from PDF for user confirmation.
-    
     Args:
         pdf_path: Path to the PDF file
-    
     Returns:
         Tuple of (success, numbers_dict, message)
     """
     try:
-        # Use the new extract_pdf_content function
-        result = extract_pdf_content(
-            pdf_path,
-            target_phrases=["management discussion and analysis", "corporate"]
-        )
+        # Use the new extract_pdf_content function (no target_phrases argument)
+        result = extract_pdf_content(pdf_path)
         
         if not result['success']:
             return False, {}, f"❌ {result.get('message', 'Could not find target phrases in PDF')}"
         
-        # Extract all candidate page numbers
         toc_page = result['table_of_content']
         
-        # Get all page number numbers from the result
-        # mda_starting_page_numbers contains: [(page_num, distance), ...]
-        # mda_ending_page_numbers contains: [(page_num, distance), ...]
-        
-        starting_numbers = result.get('mda_starting_page_numbers', [])
-        ending_numbers = result.get('mda_ending_page_numbers', [])
+        starting_numbers = result.get('starting_page_numbers', [])
+        ending_numbers = result.get('ending_page_numbers', [])
         
         numbers = {
             'table_of_content_page': toc_page,
@@ -64,7 +55,6 @@ def get_automatic_page_numbers(pdf_path: str) -> Tuple[bool, dict, str]:
         
     except Exception as e:
         return False, {}, f"❌ Error during page detection: {str(e)}"
-
 
 # def extract_text_from_pdf(
 #     pdf_file,
@@ -96,7 +86,7 @@ def extract_text_from_pdf(
             tmp_path = tmp_file.name
         
         # Open PDF
-        doc = fitz.open(tmp_path)
+        doc = pymupdf.open(tmp_path)
         
         # Validate page range
         total_pages = len(doc)
@@ -118,7 +108,7 @@ def extract_text_from_pdf(
         
         # for idx, page_num in enumerate(range(start_page - 1, end_page)):
         # NEW CODE:
-        for idx, page_num in enumerate(range(start_page + toc_page - 1, end_page + toc_page)):
+        for idx, page_num in enumerate(range(start_page + toc_page-1, end_page + toc_page-1)):
             page = doc[page_num]
             page_text = page.get_text()
             all_text.append(page_text)
@@ -382,7 +372,7 @@ Processing may take 30-60 seconds depending on document length.
                 # Create options list with page numbers and distances
                 start_options = []
                 for page_num, distance in starting_pages[:10]:  # Show top 10 numbers
-                    start_options.append(f"Page {int(page_num)} (distance: {distance:.1f})")
+                    start_options.append(f"Page {int(float(page_num))} (distance: {distance:.1f})")
                 
                 selected_start_option = st.radio(
                     "Select starting page:",
@@ -405,7 +395,8 @@ Processing may take 30-60 seconds depending on document length.
                 # Create options list
                 end_options = []
                 for page_num, distance in ending_pages[:5]:  # Show top 5 numbers
-                    end_options.append(f"Page {int(page_num)} (distance: {distance:.1f})")
+                    # end_options.append(f"Page {int(page_num)} (distance: {distance:.1f})") # error fix
+                    end_options.append(f"Page {int(float(page_num))} (distance: {distance:.1f})")
                 
                 selected_end_option = st.radio(
                     "Select ending page:",
@@ -481,13 +472,22 @@ Processing may take 30-60 seconds depending on document length.
         
         # Display extracted text in expander
         with st.expander("📝 View Extracted Text"):
-            st.text_area(
-                "Extracted Content",
-                extracted_text[:5000] + "..." if len(extracted_text) > 5000 
-                else extracted_text,
-                height=300,
-                disabled=False
-            )
+              if len(extracted_text) > 10000:
+                  display_text = (
+                      extracted_text[:5000]
+                      + "\n...\n\n[... truncated ...]\n\n...\n"
+                      + extracted_text[-1000:]
+                  )
+              else:
+                  display_text = extracted_text
+
+              st.text_area(
+                  "Extracted Content",
+                  display_text,
+                  height=300,
+                  disabled=False
+              )
+   
         
         # Step 2: Summarize
         with st.spinner(f"🤖 Generating summary with {model_choice}..."):
