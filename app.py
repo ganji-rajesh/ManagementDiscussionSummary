@@ -130,7 +130,7 @@ def extract_text_from_pdf(
 def summarize_with_gemini(
     text: str,
     api_key: str,
-    model_name: str = "gemini-2.0-flash-exp"
+    model_name: str = "gemini-2.0-flash"
 ) -> tuple[str, str]:
     """
     Summarize text using Google Gemini API.
@@ -211,9 +211,8 @@ def main():
         model_choice = st.selectbox(
             "Select Model",
             options=[
-                "gemini-2.0-flash-exp",
-                "gemini-1.5-flash",
-                "gemini-1.5-pro",
+                "gemini-2.5-flash",
+                "gemini-2.0-flash",
                 "gemini-pro"
             ],
             help="Choose the Gemini model for summarization"
