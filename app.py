@@ -1,524 +1,372 @@
 """
-Annual Report Text Extraction and Summarization with Gemini AI
-Streamlit Application with User-Confirmed Page Detection
+app.py
+
+Main entry point for the Annual Report Workspace (V2).
+Orchestrates the Streamlit UI, user input events, and bridges the 
+backend core/utils layers together.
 """
 
-import os
-import tempfile
-from typing import Optional, Tuple, List
 import streamlit as st
-import google.generativeai as genai
-import pymupdf  # PyMuPDF
+import hashlib
+import io
 
-# Import the new extraction function
-from pdf_extraction_tools1 import extract_pdf_content
-
-
-# Page configuration
-st.set_page_config(
-    page_title="MDA Summarizer",
-    page_icon="📄",
-    layout="wide",
-    initial_sidebar_state="expanded"
+# Local Module Imports
+from config import SETTINGS
+from utils import (
+    initialize_session_state,
+    add_source,
+    remove_source,
+    toggle_source,
+    get_active_context,
+    append_chat_message,
+    validate_pdf_format,
+    validate_api_key,
+    validate_page_bounds,
+    validate_source_name
 )
+from core.pdf_processing import extract_text_from_pdf, split_pdf_to_bytes, get_pdf_page_count
+from core.llm_inference import GeminiClient
+from core.prompts import SYSTEM_ANALYST_INSTRUCTION, OVERVIEW_PROMPT, build_contextual_prompt
 
-
-
-def get_automatic_page_numbers(pdf_path: str) -> Tuple[bool, dict, str]:
-    """
-    Extract page numbers from PDF for user confirmation.
-    Args:
-        pdf_path: Path to the PDF file
-    Returns:
-        Tuple of (success, numbers_dict, message)
-    """
-    try:
-        # Use the new extract_pdf_content function (no target_phrases argument)
-        result = extract_pdf_content(pdf_path)
-        
-        if not result['success']:
-            return False, {}, f"❌ {result.get('message', 'Could not find target phrases in PDF')}"
-        
-        toc_page = result['table_of_content']
-        
-        starting_numbers = result.get('starting_page_numbers', [])
-        ending_numbers = result.get('ending_page_numbers', [])
-        
-        numbers = {
-            'table_of_content_page': toc_page,
-            'starting_pages': starting_numbers,  # List of (page, distance) tuples
-            'ending_pages': ending_numbers,      # List of (page, distance) tuples
-            'found_phrases': result.get('found_phrases', [])
-        }
-        
-        return True, numbers, f"✅ Table of contents page {toc_page}"
-        
-    except Exception as e:
-        return False, {}, f"❌ Error during page detection: {str(e)}"
-
-# def extract_text_from_pdf(
-#     pdf_file,
-#     start_page: int,
-#     end_page: int
-# ) -> tuple[str, str]:
-def extract_text_from_pdf(
-    pdf_file,
-    start_page: int,
-    end_page: int,
-    toc_page: int  # NEW PARAMETER
-) -> tuple[str, str]:
-
-    """
-    Extract text from specific page range in PDF.
-    
-    Args:
-        pdf_file: Uploaded PDF file object
-        start_page: Starting page number (1-based indexing)
-        end_page: Ending page number (1-based indexing, inclusive)
-    
-    Returns:
-        Tuple of (extracted_text, error_message)
-    """
-    try:
-        # Save uploaded file to temporary location
-        with tempfile.NamedTemporaryFile(delete=False, suffix='.pdf') as tmp_file:
-            tmp_file.write(pdf_file.getvalue())
-            tmp_path = tmp_file.name
-        
-        # Open PDF
-        doc = pymupdf.open(tmp_path)
-        
-        # Validate page range
-        total_pages = len(doc)
-        if start_page < 1 or end_page < start_page:
-            doc.close()
-            os.unlink(tmp_path)
-            return "", f"Invalid page range: {start_page}-{end_page}"
-        
-        if end_page > total_pages:
-            end_page = total_pages
-            st.warning(
-                f"End page adjusted to {total_pages} "
-                f"(document has {total_pages} pages)"
-            )
-        
-        # Extract text from each page
-        all_text = []
-        progress_bar = st.progress(0)
-        
-        # for idx, page_num in enumerate(range(start_page - 1, end_page)):
-        # NEW CODE:
-        for idx, page_num in enumerate(range(start_page + toc_page-1, end_page + toc_page-1)):
-            page = doc[page_num]
-            page_text = page.get_text()
-            all_text.append(page_text)
-            
-            # Update progress
-            progress = (idx + 1) / (end_page - start_page + 1)
-            progress_bar.progress(progress)
-        
-        doc.close()
-        os.unlink(tmp_path)
-        
-        extracted_text = '\\n'.join(all_text)
-        return extracted_text, ""
-    
-    except Exception as e:
-        return "", f"Error extracting text: {str(e)}"
-
-
-def summarize_with_gemini(
-    text: str,
-    api_key: str,
-    model_name: str = "gemini-2.0-flash"
-) -> tuple[str, str]:
-    """
-    Summarize text using Google Gemini API.
-    
-    Args:
-        text: Text to summarize
-        api_key: Gemini API key
-        model_name: Gemini model name
-    
-    Returns:
-        Tuple of (summary, error_message)
-    """
-    try:
-        if not text or not text.strip():
-            return "", "Text to summarize cannot be empty"
-        
-        # Configure Gemini API
-        genai.configure(api_key=api_key)
-        
-        # Initialize the model
-        model = genai.GenerativeModel(model_name)
-        
-        # Create the prompt
-        prompt = f"""Please provide a comprehensive summary of the following \\
-Management Discussion and Analysis section from an annual report.
-
-Focus on:
-- Key business insights and industry trends
-- Financial performance highlights
-- Major risks and concerns
-- Strategic opportunities
-- Future outlook and projections
-
-Text to summarize:
-{text}
-"""
-        
-        # Generate summary
-        response = model.generate_content(prompt)
-        return response.text, ""
-    
-    except Exception as e:
-        return "", f"Error generating summary: {str(e)}"
-
-
-def main():
-    """Main Streamlit application."""
-    
-    # Header
-    st.title("📄 MDA Summarizer")
-    st.markdown(
-        "Extract and summarize Management Discussion & Analysis "
-        "sections from annual reports using Google Gemini AI"
+def init_ui():
+    """Configures the main page and ensures required states exist."""
+    st.set_page_config(
+        page_title=SETTINGS.APP_NAME,
+        page_icon="📚",
+        layout="wide",
+        initial_sidebar_state="expanded"
     )
-    st.divider()
-    
-    # Initialize session state
-    if 'detection_mode' not in st.session_state:
-        st.session_state.detection_mode = "Automatic"
-    if 'numbers' not in st.session_state:
-        st.session_state.numbers = None
-    if 'detection_complete' not in st.session_state:
-        st.session_state.detection_complete = False
-    
-    # Sidebar for inputs
+    initialize_session_state()
+
+def render_sidebar():
+    """Renders the left panel for document management and API configuration."""
     with st.sidebar:
-        st.header("⚙️ Configuration")
+        st.title(f"📚 {SETTINGS.APP_NAME}")
+        st.caption(f"Version {SETTINGS.APP_VERSION}")
         
-        # API Key input
-        api_key = st.text_input(
-            "Gemini API Key",
-            type="password",
-            help="Enter your Google Gemini API key. "
-                 "Get it from https://aistudio.google.com/app/apikey"
-        )
+        # --- 1. Document Upload ---
+        st.header("1. Upload Report")
+        uploaded_file = st.file_uploader("Upload Annual Report (PDF)", type=["pdf"])
         
-        # Model selection
-        model_choice = st.selectbox(
-            "Select Model",
-            options=[
-                "gemini-2.5-flash",
-                "gemini-2.0-flash",
-                "gemini-pro"
-            ],
-            help="Choose the Gemini model for summarization"
-        )
-        
-        st.divider()
-        
-        # File upload
-        st.header("📤 Upload PDF")
-        uploaded_file = st.file_uploader(
-            "Choose Annual Report PDF",
-            type=['pdf'],
-            help="Upload the annual report PDF file"
-        )
-        
-        st.divider()
-        
-        # Page detection mode
-        st.header("📖 Page Detection")
-        
-        # Detection mode selection
-        detection_mode = st.radio(
-            "Detection Mode",
-            options=["Automatic", "Manual"],
-            index=0,
-            help="Choose automatic detection with confirmation or manually specify page range"
-        )
-        
-        st.session_state.detection_mode = detection_mode
-        
-        # Manual mode inputs
-        if detection_mode == "Manual":
-            st.write("")
-            col1, col2 = st.columns(2)
+        if uploaded_file:
+            is_valid, msg = validate_pdf_format(
+                uploaded_file.name, 
+                uploaded_file.size, 
+                SETTINGS.MAX_FILE_SIZE_MB
+            )
+            if not is_valid:
+                st.error(msg)
+            else:
+                bytes_data = uploaded_file.getvalue()
+                # Check for new document to clear UI out
+                info_cache = st.session_state.document_info
+                if info_cache is None or info_cache.get("name") != uploaded_file.name:
+                    total_pages = get_pdf_page_count(bytes_data)
+                    st.session_state.document_info = {
+                        "name": uploaded_file.name,
+                        "bytes": bytes_data,
+                        "total_pages": total_pages
+                    }
+                    st.success(f"{uploaded_file.name} loaded ({total_pages} pages).")
+                    
+        # --- 2. Source Extraction ---
+        if st.session_state.document_info:
+            st.header("2. Extract Source")
             
-            with col1:
-                manual_start = st.number_input(
-                    "Start Page",
-                    min_value=1,
-                    value=165,
-                    step=1,
-                    help="First page of MD&A section"
-                )
+            with st.form("extraction_form"):
+                source_name = st.text_input("Source Name (e.g., 'Risk Factors')")
+                col1, col2 = st.columns(2)
+                with col1:
+                    start_page = st.number_input("Start Page", min_value=1, value=1)
+                with col2:
+                    end_page = st.number_input("End Page", min_value=1, value=1)
+                
+                submit_extract = st.form_submit_button("Extract Sub-Document")
+                
+                if submit_extract:
+                    existing_names = [s.get("name") for s in st.session_state.sources]
+                    is_valid_name, name_msg = validate_source_name(source_name, existing_names)
+                    total_pages = st.session_state.document_info.get("total_pages", 0)
+                    is_valid_bounds, bounds_msg = validate_page_bounds(start_page, end_page, total_pages)
+                    
+                    if not is_valid_name:
+                        st.error(name_msg)
+                    elif not is_valid_bounds:
+                        st.error(bounds_msg)
+                    elif len(st.session_state.sources) >= SETTINGS.MAX_SOURCES:
+                        st.error(f"Limit of {SETTINGS.MAX_SOURCES} sources reached.")
+                    else:
+                        with st.spinner(f"Extracting {source_name}..."):
+                            try:
+                                pdf_bytes = st.session_state.document_info["bytes"]
+                                # Hits PyMuPDF core utilities
+                                text = extract_text_from_pdf(pdf_bytes, start_page, end_page)
+                                sub_pdf = split_pdf_to_bytes(pdf_bytes, start_page, end_page)
+                                
+                                # Appends to Streamlit native session lists
+                                add_source(source_name, start_page, end_page, text, sub_pdf)
+                                st.success(f"Source '{source_name}' active.")
+                                st.rerun() 
+                            except Exception as e:
+                                st.error(f"Extraction failed: {str(e)}")
+                                
+        # --- 3. Context Management ---
+        if st.session_state.sources:
+            st.header("3. Active Context")
+            st.caption("Toggle checkboxes to include specific sections in LLM limits.")
             
-            with col2:
-                manual_end = st.number_input(
-                    "End Page",
-                    min_value=1,
-                    value=211,
-                    step=1,
-                    help="Last page of MD&A section"
-                )
+            # Track which source text panel is open
+            if "viewing_text_id" not in st.session_state:
+                st.session_state.viewing_text_id = None
+            
+            for source in list(st.session_state.sources):
+                colA, colB, colC, colD = st.columns([0.55, 0.15, 0.15, 0.15])
+                
+                with colA:
+                    is_checked = st.checkbox(
+                        f"{source['name']} ({source['start']}-{source['end']})", 
+                        value=source['is_active'], 
+                        key=f"chk_{source['id']}"
+                    )
+                    if is_checked != source['is_active']:
+                        toggle_source(source['id'], is_checked)
+                
+                with colB:
+                    # Toggle the text viewer for this source
+                    is_viewing = st.session_state.viewing_text_id == source['id']
+                    view_label = "🔍" if not is_viewing else "✖️"
+                    view_help = "View extracted text" if not is_viewing else "Close text viewer"
+                    if st.button(view_label, key=f"view_{source['id']}", help=view_help):
+                        if is_viewing:
+                            st.session_state.viewing_text_id = None
+                        else:
+                            st.session_state.viewing_text_id = source['id']
+                        st.rerun()
+                        
+                with colC:
+                    st.download_button(
+                        label="📄",
+                        data=source['pdf_bytes'],
+                        file_name=f"{source['name'].replace(' ', '_')}.pdf",
+                        mime="application/pdf",
+                        key=f"dl_{source['id']}",
+                        help="Download this extracted PDF"
+                    )
+                    
+                with colD:
+                    if st.button("🗑️", key=f"del_{source['id']}", help="Delete from Workspace"):
+                        remove_source(source['id'])
+                        st.rerun()
+                
+                # Show extracted text panel below the row if this source is selected
+                if st.session_state.viewing_text_id == source['id']:
+                    text_content = source.get('text_content', '')
+                    token_count = len(text_content) // 4 if text_content else 0
+                    
+                    with st.expander(f"📝 Extracted Text — {source['name']} (pages {source['start']}–{source['end']}) | ~{token_count:,} tokens", expanded=True):
+                        st.text_area(
+                            label="Extracted Content",
+                            value=text_content if text_content else '(No text available)',
+                            height=300,
+                            disabled=True,
+                            key=f"txt_{source['id']}",
+                            label_visibility="collapsed"
+                        )
+
+        # --- 4. API Configuration ---
+        st.header("4. Configuration")
+        api_key = st.text_input("Gemini API Key", type="password")
         
-        st.divider()
+        AVAILABLE_MODELS = [
+            "gemini-2.5-flash",
+            "gemini-2.0-flash", 
+            "gemini-2.0-flash-lite", 
+            "gemini-1.5-pro", 
+            "gemini-1.5-flash"
+        ]
+        selected_model = st.selectbox("Select Model", AVAILABLE_MODELS, index=1)
         
-        # Detect pages button (for automatic mode)
-        if detection_mode == "Automatic" and uploaded_file:
-            detect_button = st.button(
-                "🔍 Detect Page Numbers",
-                type="secondary",
+        if api_key:
+            is_valid, msg = validate_api_key(api_key, provider="gemini")
+            if not is_valid:
+                st.error(msg)
+            else:
+                # Detect if the API key has changed since last initialization.
+                # Uses a hash so the raw key is never stored in session state.
+                key_fingerprint = hashlib.sha256(api_key.encode()).hexdigest()
+                key_changed = (key_fingerprint != st.session_state.get("api_key_fingerprint"))
+                model_changed = (selected_model != st.session_state.get("selected_model"))
+                
+                if not st.session_state.llm_session or key_changed or model_changed:
+                    with st.spinner(f"Connecting to Google Gemini API ({selected_model})..."):
+                        try:
+                            client = GeminiClient(api_key=api_key, model_name=selected_model)
+                            client.start_chat(system_instruction=SYSTEM_ANALYST_INSTRUCTION)
+                            st.session_state.llm_session = client
+                            st.session_state.api_key_fingerprint = key_fingerprint
+                            st.session_state.selected_model = selected_model
+                            st.success(f"Connected to {selected_model} successfully!")
+                        except Exception as e:
+                            st.error(f"Failed to connect: {str(e)}")
+        else:
+            # Key was cleared — tear down the existing session
+            if st.session_state.get("llm_session"):
+                st.session_state.llm_session = None
+                st.session_state.api_key_fingerprint = None
+            st.warning("Please enter your API Key to enable chat functions.")
+
+def render_main():
+    """Renders the main Chat Interface where AI interaction happens."""
+    
+    st.header("Annual Report Analyzer")
+    
+    with st.expander("How to use this app"):
+        st.markdown("""
+        1. Enter your Gemini API Key in the left Configuration panel.
+        2. Upload an Annual Report PDF in the left panel.
+        3. Extract a section (like 'MD&A') using the page numbers.
+        4. Start querying the active context in the chat, or click 'Generate Executive Overview' for an automated summary.
+        """)
+    
+    # Pre-requisite Checks
+    if not st.session_state.llm_session:
+        st.info("👈 Please enter a valid API Key in the sidebar to activate the LLM.")
+        return
+        
+    if not st.session_state.sources:
+        st.markdown("👈 Please upload a PDF and extract a logical fragment (like *MD&A* or *Risk Factors*) to begin.")
+        return
+
+    active_context = get_active_context()
+    if not active_context.strip():
+        st.warning("⚠️ No sources are currently 'Active'. Please check a box on the left panel to provide context.")
+
+    st.divider()
+
+    # Re-render Visual History
+    for msg in st.session_state.chat_history:
+        with st.chat_message(msg["role"]):
+            st.markdown(msg["content"])
+            if "tokens" in msg:
+                t = msg["tokens"]
+                st.caption(f"Tokens: Input **{t['input']}** | Output **{t['output']}** | Total **{t['total']}**")
+
+    # High-level Automation action positioned just above the chat box
+    # Place Download functionality to right of Overview button
+    col_btn1, col_btn2 = st.columns([0.7, 0.3])
+    
+    with col_btn1:
+        generate_overview = st.button("📊 Generate Executive Overview", type="primary", use_container_width=True)
+        
+    with col_btn2:
+        pdf_bytes = None
+        if st.session_state.chat_history:
+            try:
+                import textwrap
+                from fpdf import FPDF
+                pdf = FPDF()
+                pdf.add_page()
+                pdf.set_font("helvetica", size=11)
+                for hm in st.session_state.chat_history:
+                    role_str = "User" if hm["role"] == "user" else "Assistant"
+                    # Safe encoding without crashing on special characters
+                    safe_txt = hm["content"].encode('latin-1', 'replace').decode('latin-1')
+                    
+                    # Force word splitting for unusually long unbroken strings (URLs, markdown dividers)
+                    # This prevents FPDF2's 'Not enough horizontal space' error.
+                    wrapped_lines = []
+                    for line in safe_txt.split('\n'):
+                        wrapped_lines.append('\n'.join(textwrap.wrap(line, width=80, break_long_words=True)))
+                    wrapped_txt = '\n'.join(wrapped_lines)
+
+                    pdf.set_font("helvetica", style="B", size=12)
+                    pdf.multi_cell(0, 10, f"{role_str}:")
+                    pdf.set_font("helvetica", size=11)
+                    pdf.multi_cell(0, 8, wrapped_txt)
+                    pdf.ln(5)
+                pdf_bytes = bytes(pdf.output())
+            except Exception as e:
+                st.error(f"Cannot generate PDF: {e}")
+        
+        if pdf_bytes:
+            st.download_button(
+                label="📥 Download PDF",
+                data=pdf_bytes,
+                file_name="chat_history.pdf",
+                mime="application/pdf",
                 use_container_width=True
             )
+
+    if generate_overview:
+        if not active_context.strip():
+            st.error("Cannot generate an overview without active source context.")
         else:
-            detect_button = False
-        
-        # Process button
-        if detection_mode == "Manual":
-            process_enabled = uploaded_file and api_key
-        else:
-            process_enabled = uploaded_file and api_key and st.session_state.detection_complete
-        
-        process_button = st.button(
-            "🚀 Generate Summary",
-            type="primary",
-            use_container_width=True,
-            disabled=not process_enabled
-        )
-    
-    # Main content area
-    if not uploaded_file:
-        st.info("👈 Please upload a PDF file from the sidebar to begin")
-        
-        # Instructions
-        with st.expander("📚 How to use this app", expanded=True):
-            st.markdown("""
-### Getting Started
-
-1. **Get Gemini API Key**: Visit [Google AI Studio](https://aistudio.google.com/app/apikey) 
-   to create a free API key
-2. **Enter API Key**: Paste your API key in the sidebar
-3. **Upload PDF**: Upload your annual report PDF file
-4. **Choose Detection Mode**:
-   - **Automatic**: AI detects starting and ending pages management discussion section, you confirm them from the selection
-   - **Manual**: Specify start and end page numbers directly
-5. **Detect Pages** (Automatic mode): Click to find page number numbers
-6. **Confirm Pages** (Automatic mode): Review and select the correct page numbers
-7. **Generate Summary**: Click to process and summarize
-
-### Automatic Detection with Confirmation
-
-The automatic mode:
-- Searches for "Management Discussion and Analysis" in the Table of Contents
-- Extracts all nearby page numbers using spatial analysis
-- Presents them to you for confirmation
-- Uses your confirmed selection for extraction
-
-### Note
-
-Processing may take 30-60 seconds depending on document length.
-""")
-        return
-    
-    # Display file info
-    st.success(f"✅ File uploaded: **{uploaded_file.name}**")
-    
-    # Handle page detection button click
-    if detect_button:
-        # Save file temporarily for page detection
-        with tempfile.NamedTemporaryFile(delete=False, suffix='.pdf') as tmp_file:
-            tmp_file.write(uploaded_file.getvalue())
-            tmp_path = tmp_file.name
-        
-        with st.spinner("🔍 Detecting page numbers using spatial analysis..."):
-            success, numbers, msg = get_automatic_page_numbers(tmp_path)
-        
-        # Clean up temp file
-        os.unlink(tmp_path)
-        
-        if success:
-            st.session_state.numbers = numbers
-            st.session_state.detection_complete = False
-            st.success(msg)
-        else:
-            st.error(msg)
-            st.session_state.numbers = None
-    
-    # Display candidate selection UI if numbers are available
-    if st.session_state.numbers and detection_mode == "Automatic":
-        st.subheader("📋 Detected Page Number numbers")
-        
-        numbers = st.session_state.numbers
-        
-        st.info(f"📍 Found in Table of Contents on page **{numbers['table_of_content_page']}**")
-        st.write(f"🔍 Search phrase: **{', '.join(numbers['found_phrases'])}**")
-        
-        st.divider()
-        
-        # Create columns for start and end page selection
-        col1, col2 = st.columns(2)
-        
-        with col1:
-            st.write("### 📖 Starting Page numbers")
+            with st.chat_message("user"):
+                st.write("Generate Overview")
+            append_chat_message("user", "Generate Overview")
             
-            starting_pages = numbers['starting_pages']
-            if starting_pages:
-                # Create options list with page numbers and distances
-                start_options = []
-                for page_num, distance in starting_pages[:10]:  # Show top 10 numbers
-                    start_options.append(f"Page {int(float(page_num))} (distance: {distance:.1f})")
-                
-                selected_start_option = st.radio(
-                    "Select starting page:",
-                    options=start_options,
-                    index=0,
-                    key="start_page_selection"
-                )
-                
-                # Extract the selected page number
-                confirmed_start = int(selected_start_option.split()[1])
-            else:
-                st.warning("No starting page numbers found")
-                confirmed_start = None
-        
-        with col2:
-            st.write("### 📖 Ending Page numbers")
+            # Construct the secure prompt wrapping the rules
+            prompt = build_contextual_prompt(OVERVIEW_PROMPT, active_context)
             
-            ending_pages = numbers['ending_pages']
-            if ending_pages:
-                # Create options list
-                end_options = []
-                for page_num, distance in ending_pages[:5]:  # Show top 5 numbers
-                    # end_options.append(f"Page {int(page_num)} (distance: {distance:.1f})") # error fix
-                    end_options.append(f"Page {int(float(page_num))} (distance: {distance:.1f})")
-                
-                selected_end_option = st.radio(
-                    "Select ending page:",
-                    options=end_options,
-                    index=0,
-                    key="end_page_selection"
-                )
-                
-                # Extract the selected page number
-                confirmed_end = int(selected_end_option.split()[1])
-            else:
-                st.warning("No ending page numbers found")
-                confirmed_end = None
-        
-        st.divider()
-        
-        # Confirm button
-        if confirmed_start and confirmed_end:
-            if st.button("✅ Confirm Page Selection", type="primary", use_container_width=True):
-                st.session_state.confirmed_start_page = confirmed_start
-                st.session_state.confirmed_end_page = confirmed_end
-                st.session_state.detection_complete = True
-                st.success(f"✅ Confirmed: Pages {confirmed_start} to {confirmed_end}")
-                st.rerun()
-        
-        # Show confirmed pages if available
-        if st.session_state.detection_complete:
-            st.success(
-                f"✅ **Confirmed Page Range:** {st.session_state.confirmed_start_page} "
-                f"to {st.session_state.confirmed_end_page}"
-            )
-    
-    # Process when Generate Summary button clicked
-    if process_button:
-        # Validation
-        if not api_key:
-            st.error("❌ Please enter your Gemini API key in the sidebar")
-            return
-        
-        # Determine page range based on mode
-        if detection_mode == "Manual":
-            start_page = manual_start
-            end_page = manual_end
+            with st.chat_message("assistant"):
+                try:
+                    # Execute stream
+                    stream = st.session_state.llm_session.send_message_stream(prompt)
+                    response_text = st.write_stream(stream)
+                    
+                    usage = getattr(st.session_state.llm_session, "last_usage", None)
+                    tokens_dict = None
+                    if usage:
+                        tokens_dict = {
+                            "input": usage["prompt_tokens"],
+                            "output": usage["completion_tokens"],
+                            "total": usage["total_tokens"]
+                        }
+                    append_chat_message("assistant", response_text, tokens=tokens_dict)
+                    
+                    if tokens_dict:
+                        st.caption(f"Tokens: Input **{tokens_dict['input']}** | Output **{tokens_dict['output']}** | Total **{tokens_dict['total']}**")
+                    st.rerun() # Refresh to update PDF download bytes
+                except Exception as e:
+                    st.error(f"Inference process failed: {e}")
+
+    # Wait for Ad-Hoc queries
+    if user_input := st.chat_input("Ask a question about the active sources..."):
+        # Display the user input natively
+        with st.chat_message("user"):
+            st.markdown(user_input)
             
-            if start_page > end_page:
-                st.error("❌ Start page must be less than or equal to end page")
-                return
-        else:
-            # Automatic mode - use confirmed pages
-            start_page = st.session_state.confirmed_start_page
-            end_page = st.session_state.confirmed_end_page
-            toc_page = st.session_state.numbers['table_of_content_page']
+        append_chat_message("user", user_input)
         
-        st.info(f"📄 Extracting pages: **{start_page} to {end_page}**")
+        # Merge input with context blocks
+        full_wrapped_prompt = build_contextual_prompt(user_input, active_context)
         
-        # Step 1: Extract text
-        with st.spinner("📖 Extracting text from PDF..."):
-            extracted_text, error = extract_text_from_pdf(
-                uploaded_file,
-                start_page,
-                end_page,
-                toc_page
-            )
-        
-        if error:
-            st.error(f"❌ {error}")
-            return
-        
-        st.success(
-            f"✅ Extracted {len(extracted_text):,} characters "
-            f"from {end_page - start_page + 1} pages"
-        )
-        
-        # Display extracted text in expander
-        with st.expander("📝 View Extracted Text"):
-              if len(extracted_text) > 10000:
-                  display_text = (
-                      extracted_text[:5000]
-                      + "\n...\n\n[... truncated ...]\n\n...\n"
-                      + extracted_text[-1000:]
-                  )
-              else:
-                  display_text = extracted_text
+        # Display backend generating
+        with st.chat_message("assistant"):
+            try:
+                stream = st.session_state.llm_session.send_message_stream(full_wrapped_prompt)
+                response_text = st.write_stream(stream)
+                
+                usage = getattr(st.session_state.llm_session, "last_usage", None)
+                tokens_dict = None
+                if usage:
+                    tokens_dict = {
+                        "input": usage["prompt_tokens"],
+                        "output": usage["completion_tokens"],
+                        "total": usage["total_tokens"]
+                    }
+                append_chat_message("assistant", response_text, tokens=tokens_dict)
+                
+                if tokens_dict:
+                    st.caption(f"Tokens: Input **{tokens_dict['input']}** | Output **{tokens_dict['output']}** | Total **{tokens_dict['total']}**")
+                st.rerun() # Refresh to update PDF download bytes
+            except Exception as e:
+                st.error(f"LLM API Error: {str(e)}")
 
-              st.text_area(
-                  "Extracted Content",
-                  display_text,
-                  height=300,
-                  disabled=False
-              )
-   
-        
-        # Step 2: Summarize
-        with st.spinner(f"🤖 Generating summary with {model_choice}..."):
-            summary, error = summarize_with_gemini(
-                extracted_text,
-                api_key,
-                model_choice
-            )
-        
-        if error:
-            st.error(f"❌ {error}")
-            return
-        
-        # Display summary
-        st.success("✅ Summary generated successfully!")
-        st.divider()
-        
-        st.subheader("📊 Summary")
-        st.markdown(summary)
-        
-        # Download button
-        st.download_button(
-            label="💾 Download Summary",
-            data=summary,
-            file_name="annual_report_summary.txt",
-            mime="text/plain",
-            use_container_width=True
-        )
-
+def main():
+    init_ui()
+    render_sidebar()
+    render_main()
 
 if __name__ == "__main__":
     main()
-
-
-
