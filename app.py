@@ -218,7 +218,7 @@ def render_sidebar():
 def render_main():
     """Renders the main Chat Interface where AI interaction happens."""
     
-    st.header("Annual Report Analyzer")
+    st.header("AI assitant for Annual reports")
     
     with st.expander("How to use this app"):
         st.markdown("""
